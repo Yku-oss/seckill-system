@@ -1,0 +1,20 @@
+/* 全局基础样式（业务样式写在各组件的 <style scoped> 里） */
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, "Microsoft YaHei", sans-serif;
+  background: #f5f5f5;
+  color: #333;
+}
+
+a {
+  color: #1677ff;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
