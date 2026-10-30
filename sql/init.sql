@@ -13,12 +13,17 @@ USE seckill;
 -- 设计决策（面试要讲得出"为什么"）：
 --   1. version 字段 = 乐观锁预留：DB 兜底防超卖的第二层（条件更新 + 版本校验）
 --   2. 库存用 INT，扣减用"条件更新"（stock > 0），见 SeckillGoodsMapper.deductStock
+--   3. initial_stock = 期初库存，对账基准（不可省）
+--      对账等式：initial_stock == stock + 已占用订单数(status in 0,1)
+--      为什么必须持久化：stock 只会越扣越少，事后无法反推"原本是多少"；
+--      也不能只存 Redis —— 缓存一丢基准就没了，对账永远算不准。
 -- ============================================================
 CREATE TABLE IF NOT EXISTS seckill_goods (
-    id          BIGINT       NOT NULL AUTO_INCREMENT COMMENT '商品ID',
-    goods_name  VARCHAR(64)  NOT NULL COMMENT '商品名称',
-    stock       INT          NOT NULL DEFAULT 0 COMMENT '库存数量',
-    version     INT          NOT NULL DEFAULT 0 COMMENT '乐观锁版本号',
+    id            BIGINT       NOT NULL AUTO_INCREMENT COMMENT '商品ID',
+    goods_name    VARCHAR(64)  NOT NULL COMMENT '商品名称',
+    stock         INT          NOT NULL DEFAULT 0 COMMENT '当前库存',
+    initial_stock INT          NOT NULL DEFAULT 0 COMMENT '期初库存（对账基准，初始时等于 stock）',
+    version       INT          NOT NULL DEFAULT 0 COMMENT '乐观锁版本号',
     start_time  DATETIME     NOT NULL COMMENT '秒杀开始时间',
     end_time    DATETIME     NOT NULL COMMENT '秒杀结束时间',
     create_time DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -83,5 +88,6 @@ CREATE TABLE IF NOT EXISTS mq_fail_log (
 ) ENGINE = InnoDB COMMENT = 'MQ失败消息表（生产者侧兜底）';
 
 -- 测试数据（秒杀窗口设为长期有效，方便开发调试）
-INSERT INTO seckill_goods (goods_name, stock, start_time, end_time)
-VALUES ('测试商品A', 100, '2026-08-02 00:00:00', '2026-12-31 23:59:59');
+-- initial_stock 与 stock 同值：这是"从未卖过"的起点
+INSERT INTO seckill_goods (goods_name, stock, initial_stock, start_time, end_time)
+VALUES ('测试商品A', 100, 100, '2026-08-02 00:00:00', '2026-12-31 23:59:59');
