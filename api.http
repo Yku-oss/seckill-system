@@ -1,0 +1,64 @@
+// ============================================================
+// 秒杀项目 · 接口速查表
+// 用法：在 IDEA 里点每个请求左上角的绿色箭头即可发送（IDEA 自带 HTTP Client）
+//      执行结果会开在下方 Run 窗口，能看到 HTTP 状态码和响应 JSON
+// ============================================================
+
+@host = http://localhost:8081
+
+
+### 1. 查商品列表（确认库存还有多少）
+GET {{host}}/api/seckill/goods
+
+
+### 2. 查单个商品
+GET {{host}}/api/seckill/goods/1
+
+
+### 3. 【重点】秒杀 —— Redis + Lua 版
+# 你的「耗时拆解」日志只在这个接口里，看日志就发它
+# ⚠️ 每次换一个 userId！同一个用户第二次会被「一人一单」拦掉，看不到耗时日志
+POST {{host}}/api/seckill/redis?userId=20001&goodsId=1
+
+
+### 3-B. 【对照实验】同一条链路，但去掉了 @Transactional
+# 和上面只差「事务范围」一处：UPDATE 提交即放锁，MQ 在锁外发
+# 对比两边的 DB= 那一项，就是「事务包住 MQ」的代价
+POST {{host}}/api/seckill/redis/v2?userId=20011&goodsId=1
+
+
+### 4. 秒杀 —— 纯数据库版（用来和 Redis 版对比耗时）
+POST {{host}}/api/seckill/do?userId=20002&goodsId=1
+
+
+### 5. 支付订单
+# orderNo 用第 3 步响应里返回的那串 32 位字符，复制过来替换下面的 xxx
+POST {{host}}/api/seckill/pay?orderNo=xxx
+
+
+### 6. 按订单号查订单（看 MQ 异步落单有没有成功）
+GET {{host}}/api/seckill/order?orderNo=xxx
+
+
+### 7. MQ 发消息测试
+POST {{host}}/api/seckill/mq/test?msg=hello
+
+
+### 8. 分布式锁 —— BUG 版（超卖 / 锁失效）
+GET {{host}}/api/lock/bug
+
+
+### 9. 分布式锁 —— 修复版（Lua 校验持有者）
+GET {{host}}/api/lock/fix
+
+
+### 10. 重置锁演示用的库存
+GET {{host}}/api/lock/reset
+
+
+### 11. 手写锁 fix
+GET {{host}}/api/mylock/fix
+
+
+### 12. Redisson 锁
+GET {{host}}/api/mylock/redisson
