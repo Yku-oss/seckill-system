@@ -1,0 +1,10 @@
+spring:
+  datasource:
+    url: jdbc:mysql://host.docker.internal:3307/seckill?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+  data:
+    redis:
+      host: host.docker.internal      # ← 不是 localhost
+      port: 6380
+  rabbitmq:
+    host: host.docker.internal        # ← 不是 localhost
+    port: 5672

@@ -1,0 +1,37 @@
+# 构建产物
+target/
+build/
+*.class
+*.log
+logs/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.iws
+
+# 前端依赖与构建
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 本地环境配置
+.env
+*.local
+
+# 学习素材（不随项目入库）
+frontend/*.jpg
+frontend/*.mp4
+frontend/*.zip
+frontend/src/*.jpg
+frontend/src/*.mp4
+frontend/03-*.html
+frontend/表单.html
+frontend/超链接.html
+frontend/src/练习*.js
+frontend/src/exrcise.vue

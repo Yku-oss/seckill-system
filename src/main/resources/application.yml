@@ -1,0 +1,59 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: seckill
+  datasource:
+    url: jdbc:mysql://localhost:3307/seckill?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: root
+    password: 123456
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      read-only: false
+      maximum-pool-size: 20
+      minimum-idle: 20
+      connection-timeout: 3000
+      pool-name: Seckill-HikariPool
+      auto-commit: true
+      max-lifetime: 1800000
+  data:
+    redis:
+      host: localhost
+      port: 6380   # Docker 映射端口（宿主机 6380 → 容器 6379）；本机 6379 被 Memurai 占用，统一连 Docker 这个
+      database: 0
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+    connection-timeout: 1s
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    listener:
+      simple:
+        prefetch: 1
+        acknowledge-mode: auto
+        retry:
+          enabled: true
+          max-attempts: 3
+          initial-interval: 1000  # 
+          multiplier: 2
+          max-interval: 10000
+    template:
+      retry:
+        enabled: true
+        multiplier: 2
+
+mybatis:
+  configuration:
+    map-underscore-to-camel-case: true
+logging:
+  level:
+    com.example.seckill.mapper: debug
+seckill:
+  mq:
+    fail-test: false    # 打开：消费者故意抛异常（验证死信）；关闭：正常
+  limit:
+    capacity: 10000   # 令牌桶容量（压测临时调大，测完改回 10）
+    rate: 100        # 令牌补充速率（压测临时调大，测完改回 5）
