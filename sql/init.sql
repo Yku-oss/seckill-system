@@ -91,3 +91,7 @@ CREATE TABLE IF NOT EXISTS mq_fail_log (
 -- initial_stock 与 stock 同值：这是"从未卖过"的起点
 INSERT INTO seckill_goods (goods_name, stock, initial_stock, start_time, end_time)
 VALUES ('测试商品A', 100, 100, '2026-08-02 00:00:00', '2026-12-31 23:59:59');
+
+
+
+

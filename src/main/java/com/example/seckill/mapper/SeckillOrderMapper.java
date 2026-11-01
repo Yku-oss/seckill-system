@@ -33,4 +33,9 @@ public interface SeckillOrderMapper {
     @Select("SELECT * FROM seckill_order WHERE order_no = #{orderNo}")
     SeckillOrder selectByOrderNo(@Param("orderNo") String orderNo);
 
+    @Select("SELECT COUNT(*) FROM seckill_order " +
+            "WHERE goods_id = #{goodsId} " +
+            "AND status IN (0, 1) ")
+    int countOccupied(@Param("goodsId") Long goodsId);
+
 }
