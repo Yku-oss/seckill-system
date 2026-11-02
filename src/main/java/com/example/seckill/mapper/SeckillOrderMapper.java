@@ -38,4 +38,9 @@ public interface SeckillOrderMapper {
             "AND status IN (0, 1) ")
     int countOccupied(@Param("goodsId") Long goodsId);
 
+    @Select("SELECT COUNT(*) FROM seckill_order " +
+            "WHERE goods_id = #{goodsId} " +
+            "AND create_time >= NOW() - INTERVAL 5 MINUTE")
+    int countRecent(@Param("goodsId") Long goodsId);
+
 }
