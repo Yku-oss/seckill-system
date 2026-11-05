@@ -10,5 +10,13 @@ export default defineConfig({
     port: 5500,
     // 端口被占用时自动换下一个端口，而不是直接报错
     strictPort: false,
+    // 本地开发时把 /api 转发到后端，模拟线上 nginx 的反向代理。
+    // 这样 api.js 里可以只写相对路径 /api/seckill，开发/生产代码完全一致。
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8081',
+        changeOrigin: true,
+      },
+    },
   },
 })

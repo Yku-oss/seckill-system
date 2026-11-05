@@ -1,0 +1,11 @@
+# 构建上下文瘦身：这些目录不需要进镜像，传上去只是拖慢构建
+# 注意：target/ 不能整体排除，Dockerfile 要 COPY target/*.jar
+frontend/node_modules/
+frontend/dist/
+.git/
+.idea/
+.vscode/
+后端笔记/
+*.md
+*.py
+*.http

@@ -1,0 +1,94 @@
+# ============================================================
+# 生产编排（云服务器用）
+#
+# 与 docker-compose.yml 的区别：
+#   1. 多了 app（Spring Boot）和 nginx 两个服务
+#   2. 中间件不再映射端口到宿主机 —— 只在 compose 内网可见
+#      公网只暴露 80，MySQL/Redis/RabbitMQ 全部藏在内部
+#   3. 加了 restart: always 与内存限制，适配 2 核 2G 小机
+#
+# 启动：docker compose -f docker-compose.prod.yml up -d --build
+# ============================================================
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: seckill-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-123456}
+      MYSQL_DATABASE: seckill
+      TZ: Asia/Shanghai
+    # 2G 内存的关键：MySQL 默认 buffer pool 128M 已够，显式写死防止吃光内存
+    command:
+      - --innodb-buffer-pool-size=128M
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --max-connections=100
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./sql:/docker-entrypoint-initdb.d:ro   # 首次建卷时自动执行 init.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:-123456}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    image: redis:7
+    container_name: seckill-redis
+    restart: always
+    # noeviction：库存 key 绝不能被 LRU 淘汰，否则会凭空多出库存
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+
+  # RabbitMQ 内存占用较高（Erlang VM），限制上限避免 OOM Killer 杀进程
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: seckill-rabbitmq
+    restart: always
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-guest}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+
+  app:
+    build: .
+    container_name: seckill-app
+    restart: always
+    depends_on:
+      mysql:
+        condition: service_healthy     # 必须等 MySQL 真正 ping 通，否则启动就崩
+      redis:
+        condition: service_started
+      rabbitmq:
+        condition: service_started
+    environment:
+      SPRING_PROFILES_ACTIVE: cloud
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-123456}
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-guest}
+      TZ: Asia/Shanghai
+      # 2G 小机的保命参数：不给 JVM 限制堆，容器会被 OOM Killer 直接杀掉
+      JAVA_TOOL_OPTIONS: "-Xms192m -Xmx320m -XX:MaxMetaspaceSize=160m -XX:+UseSerialGC"
+    ports:
+      - "127.0.0.1:8081:8081"   # 只绑本机回环，公网一律走 nginx
+
+  nginx:
+    image: nginx:alpine
+    container_name: seckill-nginx
+    restart: always
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+    volumes:
+      - ./frontend/dist:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  mysql-data:
+  redis-data:
+  rabbitmq-data:
