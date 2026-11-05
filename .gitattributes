@@ -1,0 +1,19 @@
+# 统一换行符，避免 Windows 上编辑的配置文件传到 Linux 后带 \r
+# （nginx 对 CRLF 很敏感，可能出现「unknown directive」之类的报错）
+* text=auto eol=lf
+
+*.conf   text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.sh     text eol=lf
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+*.java   text eol=lf
+*.js     text eol=lf
+*.vue    text eol=lf
+
+# 二进制文件不做转换
+*.jar    binary
+*.png    binary
+*.jpg    binary
+*.pdf    binary

@@ -83,6 +83,11 @@ scp /tmp/seckill-deploy.tar.gz root@你的服务器IP:/root/
 ssh root@你的服务器IP
 mkdir -p /opt/seckill && tar xzf /root/seckill-deploy.tar.gz -C /opt/seckill
 cd /opt/seckill
+
+# ⚠️ Windows 打包的文件是 CRLF 换行，Linux 上的 nginx 会解析失败
+#    这一步不能省，否则容器起不来还看不出原因
+find . -type f \( -name "*.conf" -o -name "*.yml" -o -name "Dockerfile" \) -exec sed -i 's/\r$//' {} \;
+
 docker compose -f docker-compose.prod.yml up -d --build
 ```
 
