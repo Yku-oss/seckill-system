@@ -24,6 +24,9 @@ Thumbs.db
 .env
 *.local
 
+# 个人笔记（面试准备材料，不随仓库公开）
+后端笔记/
+
 # 学习素材（不随项目入库）
 frontend/*.jpg
 frontend/*.mp4

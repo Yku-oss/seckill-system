@@ -44,9 +44,11 @@ flowchart TB
     TC --> RD[(Redis 回补)]
 ```
 
+> 📐 **一次完整请求的逐行拆解**（含限流、异步落单、超时取消、失败补偿、库存对账）见 [`docs/全流程导图.md`](docs/全流程导图.md)
+
 ---
 
-## ✨ 核心功能（8 项）
+## ✨ 核心功能（9 项）
 
 ### 1. 防超卖 —— 双层防线
 
@@ -224,20 +226,54 @@ services:
 
 ```dockerfile
 FROM eclipse-temurin:21-jre
+WORKDIR /app
 COPY target/seckill-0.0.1-SNAPSHOT.jar app.jar
 EXPOSE 8081
-ENTRYPOINT ["java","-jar","app.jar","--spring.profiles.active=docker"]
+ENV SPRING_PROFILES_ACTIVE=cloud    # 默认值，compose 的 environment 可覆盖
+ENV TZ=Asia/Shanghai
+ENTRYPOINT ["java","-jar","app.jar"]
 ```
+
+> ⚠️ **踩坑记录**：激活哪个 profile **不能写死在 ENTRYPOINT 里**。
+> 之前写成 `ENTRYPOINT ["java","-jar","app.jar","--spring.profiles.active=docker"]`，
+> 结果 compose 里设的 `SPRING_PROFILES_ACTIVE=cloud` 被命令行参数覆盖（Spring Boot 优先级：命令行 > 环境变量 > yml），
+> 容器一直拿 `application-docker.yml` 里的 `host.docker.internal:6380` 连 Redis → 启动失败。
+> 改用 `ENV` 给默认值后解决。
 
 **配置文件隔离**：
 
 | 文件 | 数据库地址 | Redis 地址 | 场景 |
 |---|---|---|---|
 | `application.yml` | `localhost:3307` | `localhost:6379` | 本机开发 |
-| `application-docker.yml` | `host.docker.internal:3307` | `host.docker.internal:6379` | 容器内运行 |
+| `application-docker.yml` | `host.docker.internal:3307` | `host.docker.internal:6379` | 单容器运行，连宿主机中间件 |
+| `application-cloud.yml` | `mysql:3306` | `redis:6379` | compose 全栈编排，靠服务名互通 |
 
 > ⚠️ **容器内不能用 `localhost`**！容器里的 localhost 是容器自己，
 > 要用 `host.docker.internal` 指向宿主机。
+
+---
+
+### 9. 库存对账 —— 三式交叉校验
+
+定时自查 DB 与 Redis 的库存是否出现不一致。**只读报警，不自动修复。**
+
+**三条独立等式**：
+
+| 校验 | 等式 | 能发现什么 |
+|---|---|---|
+| A（DB 侧） | `stock + occupied == initial_stock` | DB 内部对不上：扣减丢了 / 占用数算错 |
+| B（Redis 侧） | `redis_stock + occupied == initial_stock` | Redis 内部对不上：Lua 扣了但业务没走完 |
+| C（两边一致） | `redis_stock == stock` | 双写不同步：一边扣了另一边没扣 |
+
+> **A 的右端为什么是 `initial_stock` 而不是当前库存？**
+> 因为它是一条**固定基准**。如果用动态值，两边一起错的时候反而测不出来。
+
+**四个设计要点**：
+
+1. **三条独立 `if`，不用 `else if`** —— 一次暴露全部问题，而不是改完一个才发现下一个
+2. **在途窗口跳过** —— Lua 已扣 Redis、订单还没落库的那几秒，A/B 各差 1、C 平属于正常。用 `COUNT(*) WHERE create_time > NOW() - INTERVAL 5 MINUTE` 判断，有在途订单就跳过本轮
+3. **第一版只读** —— 判定逻辑没经过验证就自动修，等于自动破坏。演进路径：只读报警 → 连续 N 轮去抖 → 定向修复
+4. **一处时钟原则** —— 时间比较全部交给 SQL 的 `NOW()`，Java 侧不参与，避免两边时钟漂移
 
 ---
 
@@ -268,9 +304,13 @@ private static final String ADD_STOCK_LUA =
 
 | 接口 | 方法 | 参数 | 说明 |
 |---|---|---|---|
-| `/api/seckill/redis` | POST | `userId`, `goodsId` | **秒杀主接口**（Redis + MQ） |
-| `/api/seckill/do` | POST | `userId`, `goodsId` | 秒杀（DB 兜底版，教学对比用） |
-| `/api/seckill/pay` | POST | `orderNo` | 支付订单 |
+| `/api/seckill/redis` | POST | `userId`, `goodsId` | **秒杀主接口**（Redis 预减 + MQ 异步落单，带事务） |
+| `/api/seckill/redis/v2` | POST | `userId`, `goodsId` | 对照实验：同逻辑但**无事务**，用于压测对比 |
+| `/api/seckill/do` | POST | `userId`, `goodsId` | 早期版本（同步落单，无 MQ 削峰） |
+| `/api/seckill/pay` | POST | `orderNo` | 支付订单（status 0→1） |
+| `/api/seckill/order` | GET | `orderNo` | 查询订单状态 |
+| `/api/seckill/goods` | GET | — | 商品列表 |
+| `/api/seckill/goods/{id}` | GET | `id` | 商品详情 |
 | `/api/seckill/mq/test` | POST | `msg` | MQ 连通性测试 |
 
 **订单状态机**：`0 待支付` → `1 已支付` / `2 已取消`
@@ -313,6 +353,11 @@ docker run --name seckill-app -p 8081:8081 \
   seckill-app
 ```
 
+### 上云部署（单机全栈）
+
+生产编排见 `docker-compose.prod.yml`（app + nginx + mysql + redis + rabbitmq，中间件不映射宿主机端口），
+完整步骤、防火墙配置、镜像加速、排错表见 **[DEPLOY.md](DEPLOY.md)**。
+
 ---
 
 ## 📁 项目结构
@@ -338,6 +383,9 @@ seckill/
 │   ├── consumer/
 │   │   ├── OrderConsumer.java           # 异步落单
 │   │   └── OrderTimeoutConsumer.java    # 超时取消 + 回补
+│   ├── task/
+│   │   ├── StockReconcileTask.java      # 库存对账（三式交叉校验）
+│   │   └── MqFailRetryTask.java         # MQ 失败消息定时重发
 │   ├── runner/
 │   │   └── StockPreheatRunner.java      # 库存预热
 │   └── common/
@@ -345,10 +393,15 @@ seckill/
 │       └── GlobalExceptionHandler.java  # 全局异常
 ├── src/main/resources/
 │   ├── application.yml                  # 本机配置
-│   └── application-docker.yml           # 容器配置
+│   ├── application-docker.yml           # 单容器配置
+│   └── application-cloud.yml            # compose 全栈配置
 ├── sql/init.sql                         # 建表 + 初始数据
+├── docs/全流程导图.md                     # 一次请求的完整拆解
 ├── Dockerfile
-├── docker-compose.yml
+├── docker-compose.yml                   # 本地开发
+├── docker-compose.prod.yml              # 生产编排
+├── nginx.conf                           # 静态托管 + API 反代
+├── DEPLOY.md                            # 部署手册
 └── test_concurrent.py                   # 并发压测脚本
 ```
 
