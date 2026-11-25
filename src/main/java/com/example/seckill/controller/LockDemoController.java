@@ -33,7 +33,6 @@ public class LockDemoController {
     private final AtomicInteger bugHolding = new AtomicInteger(0);
     private final AtomicInteger bugViolation = new AtomicInteger(0);
 
-
     @GetMapping("/bug")
     public String bug() throws InterruptedException {
         Boolean locked = redis.opsForValue()

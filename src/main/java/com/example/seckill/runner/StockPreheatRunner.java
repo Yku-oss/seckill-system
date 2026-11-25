@@ -37,7 +37,7 @@ public class StockPreheatRunner implements CommandLineRunner {
 
         // 2. 遍历，把每个商品的库存写入 Redis
         for (SeckillGoods goods : goodsList) {
-            // key 必须和 STOCK_LUA 里用的一致：seckill:stock:{goodsId}
+            // key 必须和 STOCK_LUA_ACK 里用的一致：seckill:stock:{goodsId}
             String key = "seckill:stock:" + goods.getId();
             // value 用字符串（StringRedisTemplate 只能存 String）
             String value = String.valueOf(goods.getStock());

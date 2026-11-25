@@ -2,11 +2,15 @@ package com.example.seckill.consumer;
 
 import com.example.seckill.config.RabbitMQConfig;
 import com.example.seckill.entity.SeckillOrder;
+import com.example.seckill.mapper.SeckillGoodsMapper;
+import com.example.seckill.service.SeckillService;
 import com.example.seckill.mapper.SeckillOrderMapper;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Component;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * 秒杀订单消费者 —— MQ 削峰的核心
@@ -14,17 +18,23 @@ import org.springframework.stereotype.Component;
  * 主流程（doSeckillByRedis）扣完库存后只发一条消息就返回，
  * 真正"落单"由这里异步完成：MQ 把洪峰排队，消费者按自己节奏慢慢落库，DB 不被瞬时打爆。
  */
+@Slf4j
 @Component
 public class OrderConsumer {
 
     private final SeckillOrderMapper orderMapper;
+    private final SeckillGoodsMapper goodsMapper;
+    private final SeckillService seckillService;
 
     @Value("${seckill.mq.fail-test:false}")
     private boolean failTest;
 
 
-    public OrderConsumer(SeckillOrderMapper orderMapper) {
+    public OrderConsumer(SeckillOrderMapper orderMapper, SeckillGoodsMapper goodsMapper,
+                         SeckillService seckillService) {
         this.orderMapper = orderMapper;
+        this.goodsMapper = goodsMapper;
+        this.seckillService = seckillService;
     }
 
     @RabbitListener(queues = RabbitMQConfig.SECKILL_ORDER_QUEUE)
@@ -48,6 +58,7 @@ public class OrderConsumer {
         order.setGoodsId(goodsId);
         order.setStatus(0);
 
+
         // ========== 幂等：重复投递必须"当成功"，不能当失败 ==========
         // 什么情况会重复投递？
         //   ① 消费者 insert 成功后、ack 之前进程被杀/网络断
@@ -67,6 +78,18 @@ public class OrderConsumer {
         } catch (DuplicateKeyException e) {
             // 唯一键兜底挡住了重复插入 —— 这正是 uk_order_no 存在的意义
             System.out.println("【MQ异步落单】订单已存在，跳过（幂等）：orderNo=" + orderNo);
+            String mag = e.getMessage();
+            if (mag != null && mag.contains("uk_user_goods")) {
+                // 撞 uk_user_goods：这一单没落成，但下单时库存已经在 DB 和 Redis 各扣了一次 -> 两边都要还
+                // 只补 DB  -> Redis 永远少一件，商品挂着「已售罄」卖不出去（少卖）
+                // 只补 Redis -> DB 少一件，账面对不上（多卖）
+                log.warn("用户重复购买，回补库存（DB + Redis）：goodsId={}, orderNo={}", goodsId, orderNo);
+                goodsMapper.addStock(goodsId);
+                seckillService.addStockToRedis(goodsId);
+            } else {
+                // 撞 uk_order_no：同一条消息重复投递，这单的库存早就正确扣过了、不会重复扣 -> 什么都不做
+                log.info("订单已存在，幂等跳过：orderNo={}", orderNo);
+            }
             return;   // ← 关键：return 而不是 throw，让框架 ack 掉这条消息
         }
 

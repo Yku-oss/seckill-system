@@ -27,7 +27,9 @@ services:
     container_name: seckill-rabbitmq
     ports:
       - "5672:5672"
-      - "15672:15672"
+      # 15672/15673 落进了 Windows winnat 动态保留端口范围（本次 15667-15766），
+      # 改映射到 25672 绕开；管理台访问 http://localhost:25672
+      - "25672:15672"
     environment:
       - RABBITMQ_DEFAULT_USER=guest
       - RABBITMQ_DEFAULT_PASS=guest

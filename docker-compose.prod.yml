@@ -71,6 +71,8 @@ services:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-guest}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-guest}
       TZ: Asia/Shanghai
+      # 由同目录的 .env 提供（compose 自动读取），不要把真值写在这里
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
       # 2G 小机的保命参数：不给 JVM 限制堆，容器会被 OOM Killer 直接杀掉
       JAVA_TOOL_OPTIONS: "-Xms192m -Xmx320m -XX:MaxMetaspaceSize=160m -XX:+UseSerialGC"
     ports:

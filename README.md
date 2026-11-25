@@ -1,4 +1,4 @@
-# 秒杀系统（Seckill）
+# Flash Sale · 高并发秒杀系统
 
 > 一个从零手写的**高并发电商秒杀系统**，聚焦「防超卖、削峰限流、消息可靠性」三大核心难点。
 > Spring Boot 3.4 + Java 21 + Redis + RabbitMQ + MySQL + Docker
@@ -58,14 +58,21 @@ flowchart TB
 **解决**：
 
 ```java
-// 第一层：Redis + Lua 原子预减（挡住 99% 流量，不碰数据库）
-private static final String STOCK_LUA =
-    "local stock = tonumber(redis.call('GET', KEYS[1])) " +
-    "if stock == nil then return -1 end " +          // 商品不存在
-    "if stock < tonumber(ARGV[1]) then return 0 end " + // 库存不足
-    "redis.call('DECRBY', KEYS[1], ARGV[1]) " +      // 原子扣减
+// 第一层：Redis + Lua 原子闸门（查限购标记 + 预减库存，一次脚本完成）
+// KEYS[1]=库存 key  KEYS[2]=用户标记 Hash  ARGV[1]=userId  ARGV[2]=orderNo
+private static final String STOCK_LUA_ACK =
+    "local exist = redis.call('HEXISTS', KEYS[2], ARGV[1]) " +
+    "if(exist == 1) then return -2 end " +           // 一人一单：已抢过
+    "local stock = tonumber(redis.call('GET',KEYS[1])) " +
+    "if(stock == nil) then return -1 end " +         // 商品不存在 / 未预热
+    "if(stock < 1) then return 0 end " +             // 已售罄
+    "redis.call('DECRBY',KEYS[1],1) " +              // 原子扣减
+    "redis.call('HSET',KEYS[2],ARGV[1],ARGV[2]) " +  // 写标记，value = orderNo（撤回凭证）
     "return 1";
 ```
+
+> 早期版本只有「扣库存」一个动作，同一用户并发请求会重复扣减，产生**无主扣减**。
+> 现在查询标记、判断库存、扣减、写标记四步都在同一个 Lua 里，Redis 单线程保证原子。
 
 ```java
 // 第二层：MySQL 条件更新兜底（行锁保证原子）
@@ -83,11 +90,12 @@ int deductStock(@Param("id") Long id);
 
 ### 2. 一人一单
 
-**三层保障**：
+**四层保障**：
 
 | 层 | 手段 | 作用 |
 |---|---|---|
 | 业务层 | `selectByUserAndGoods` 预检 | 挡住重复请求，省资源 |
+| Redis 层 | `STOCK_LUA_ACK` 的 `HEXISTS` 标记 | **并发下的原子拦截**，标记 value 存 `orderNo` 作撤回凭证 |
 | 数据库 | `UNIQUE KEY uk_user_goods (user_id, goods_id)` | **并发下的最终兜底** |
 | 异常层 | `GlobalExceptionHandler` 捕获 `DuplicateKeyException` | 友好返回 |
 
@@ -227,7 +235,7 @@ services:
 ```dockerfile
 FROM eclipse-temurin:21-jre
 WORKDIR /app
-COPY target/seckill-0.0.1-SNAPSHOT.jar app.jar
+COPY target/flash-sale-0.0.1-SNAPSHOT.jar app.jar
 EXPOSE 8081
 ENV SPRING_PROFILES_ACTIVE=cloud    # 默认值，compose 的 environment 可覆盖
 ENV TZ=Asia/Shanghai
@@ -304,9 +312,7 @@ private static final String ADD_STOCK_LUA =
 
 | 接口 | 方法 | 参数 | 说明 |
 |---|---|---|---|
-| `/api/seckill/redis` | POST | `userId`, `goodsId` | **秒杀主接口**（Redis 预减 + MQ 异步落单，带事务） |
-| `/api/seckill/redis/v2` | POST | `userId`, `goodsId` | 对照实验：同逻辑但**无事务**，用于压测对比 |
-| `/api/seckill/do` | POST | `userId`, `goodsId` | 早期版本（同步落单，无 MQ 削峰） |
+| `/api/seckill/redis` | POST | `userId`, `goodsId` | **秒杀唯一入口**（限流 + Redis 标记/预减 + MQ 异步落单，带事务） |
 | `/api/seckill/pay` | POST | `orderNo` | 支付订单（status 0→1） |
 | `/api/seckill/order` | GET | `orderNo` | 查询订单状态 |
 | `/api/seckill/goods` | GET | — | 商品列表 |

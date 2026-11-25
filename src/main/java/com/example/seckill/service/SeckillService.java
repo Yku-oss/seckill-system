@@ -1,6 +1,5 @@
 package com.example.seckill.service;
 
-import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 
@@ -61,67 +60,40 @@ public class SeckillService {
     this.stringRedisTemplate = stringRedisTemplate;
     this.rabbitTemplate = rabbitTemplate;// ← 新加这行
 }
-    @Transactional
-    public Result<?> doSeckill(Long userId, Long goodsId) {
-        // 1. 查商品 + 校验秒杀时间窗
-        SeckillGoods goods = goodsMapper.selectById(goodsId);
-        if (goods == null) {
-            // 先查看库存是否存在，不存在就返回404，404在网络中是搜索不到，不存在。
-            return Result.error(404, "商品不存在");
-        }
-        // LocalDateTime 是时间方法类，是java自带的方法包，记录当前时间
-        LocalDateTime now = LocalDateTime.now();
-        //查看当前下单的时候是否在秒杀时间内，如果不在就返回400，400是请求出错
-        if (now.isBefore(goods.getStartTime()) || now.isAfter(goods.getEndTime())) {
-            return Result.error(400, "不在秒杀时间窗口内");
-        }
+    // ===== Redis 原子闸门：查标记 → 查库存 → 扣减 + 写标记，四步同一个脚本 =====
+//    KEYS[1]	库存 key
+//    KEYS[2]	用户标记
+//    ARGV[1]	userId
+//    ARGV[2]	orderNo
 
-        // 2. 一人一单（业务层预检；DB 唯一键 uk_user_goods 是并发下的最终兜底）
-        if (orderMapper.selectByUserAndGoods(userId, goodsId) != null) {
-            return Result.error(400, "每人限购一件");
-        }
-
-        // 3. DB 条件扣减：库存足够才扣，行锁保证原子（防超卖核心）
-        int rows = goodsMapper.deductStock(goodsId);
-        if (rows == 0) {
-            return Result.error(400, "库存不足");
-        }
-
-        // 4. 落订单（order_no 唯一键兜底幂等；并发重复下单会抛 DuplicateKeyException
-        //    → 全局异常处理器兜底 → 事务回滚，包括第3步的扣库存）
-        // 实现了MQ异步削峰，异步落单，先预减扣除DB，再进行落单
-        // 但是MQ不能直接发送java对象，是生成了以一个UUID转变成String形式后，再发送给后面新new的订单对象中
-        String orderNo = UUID.randomUUID().toString().replace("-", "");
-        String body = userId + ":" + goodsId + ":" + orderNo;
-        // 带上"面单"：nack 时 confirm 回调靠它重建消息（body + 目标队列），否则只能转人工
-        rabbitTemplate.convertAndSend(
-                "",
-                RabbitMQConfig.SECKILL_ORDER_QUEUE,
-                body,
-                new SeckillCorrelationData(orderNo + ":order", body,
-                        "", RabbitMQConfig.SECKILL_ORDER_QUEUE));
-        // 落单交给 MQ 消费者异步完成，这里不再同步 insert（否则会重复落单、订单号还不一致）
-
-        return Result.success(new SeckillResult(orderNo, "抢购成功，订单处理中"));
-
-    }
-
-        // ① Lua 脚本（常量，放字段下面）
-    //作用是先查看当前商品的库存，然后通过判断库存的多少来返回订单状态，比如库存不足 0，已支付 1，商品不存在-1
-    // 这段原子代码的主要作用是档流量的
-private static final String STOCK_LUA =
-    "local stock = tonumber(redis.call('GET', KEYS[1])) " +
-    "if stock == nil then return -1 end " +
-    "if stock < tonumber(ARGV[1]) then return 0 end " +
-    "redis.call('DECRBY', KEYS[1], ARGV[1]) " +
-    "return 1";
-
+private static final String STOCK_LUA_ACK =
+     "local exist = redis.call('HEXISTS', KEYS[2], ARGV[1]) " +
+     "if(exist == 1) then return -2 end " +
+     "local stock = tonumber(redis.call('GET',KEYS[1])) " +
+      "if(stock == nil) then return -1 end " +
+     "if(stock < 1) then return 0 end " +
+     "redis.call('DECRBY',KEYS[1],1) " +
+      "redis.call('HSET',KEYS[2],ARGV[1],ARGV[2]) " +
+      "return 1";
     // ④ 库存回补 Lua 脚本（取消/超时订单时用）
     // 逻辑：key 存在 → 库存 +1；key 不存在 → 什么都不做（返回 -1）
     // 为什么加 EXISTS 判断？防止给「未预热 / key 已过期」的商品凭空造出库存
     private static final String ADD_STOCK_LUA =
             "if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end " +
             "return redis.call('INCR', KEYS[1])";
+
+    // ⑤ 撤回 LUA（Redis 已经扣了、但后面没走成时用，目前是 DB 扣减失败那一支）
+    //    KEYS[1] 库存 key / KEYS[2] 用户标记 Hash / ARGV[1] userId / ARGV[2] orderNo
+    //    返回：1 撤回成功 / 0 已经撤回过（幂等）/ -1 标记属于用户后来新下的那单，不能动 / -2 库存 key 不存在
+    //    为什么用 orderNo 当凭证：标记的 value 存的是 orderNo，对不上就说明不是「我这一单」
+    private static final String ROLLBACK_LUA =
+            "local cur = redis.call('HGET', KEYS[2], ARGV[1]) " +
+            "if cur == false then return 0 end " +                                   // 标记已没了 = 上一次已经撤回过
+            "if cur ~= ARGV[2] then return -1 end " +                                // 标记是别人（新单）的
+            "if redis.call('EXISTS', KEYS[1]) == 0 then return -2 end " +            // 防止凭空造库存
+            "redis.call('HDEL', KEYS[2], ARGV[1]) " +
+            "redis.call('INCR', KEYS[1]) " +
+            "return 1";
 
     /* ============================================================
      * ③ 令牌桶限流 Lua 脚本
@@ -207,6 +179,10 @@ private static final String STOCK_LUA =
                     "  return 0 " +                                                   // 0 = 桶空了，拒绝
                     "end";
 
+
+
+
+
     /**
      * 从令牌桶里取一个令牌（限流检查）。
      *
@@ -229,88 +205,6 @@ private static final String STOCK_LUA =
     }
 
 
-    // ② 方法（放在 testIncrement 下面）
-/* ============================================================
- * 【对照实验版】doSeckillByRedisV2
- * ============================================================
- * 和 doSeckillByRedis 唯一的区别：这个方法【没有 @Transactional】。
- *
- * 【为什么这一行注解就是瓶颈】
- *   原版：@Transactional 包住整个方法，事务从进方法就开启，直到方法返回才提交。
- *         中间夹着两次 rabbitTemplate.convertAndSend，每次都要网络往返 + 等 confirm。
- *         于是「seckill_goods 那一行的行锁」被持有到 MQ 发完才释放。
- *         并发 N 个请求 → 第 N 个要排队等 (N-1) × (DB + 2×MQ) 的时间。
- *         压测时那条 UPDATE 平均 113ms、最大 317ms 就是这么来的，不是 SQL 慢。
- *
- *   V2：  没有外层事务，deductStock 单条 UPDATE 本身就是原子的（autocommit），
- *         执行完立刻提交、立刻放锁，MQ 在锁外发。
- *         行锁持有时间从「DB + 2×MQ」降到「DB」。
- *
- * 【代价】MQ 发送失败时 DB 已提交，需要手动回补（下面 try-catch 里做了）。
- *         原版是事务回滚，但 Redis 已经扣了，同样不一致，也要靠超时任务兜底。
- * ============================================================ */
-public Result<?> doSeckillByRedisV2(Long userId, Long goodsId) {
-    Long allowed = tryTokenBucket("seckill:limit:all", limitCapacity, limitRate);
-    if (allowed == null || allowed == 0) {
-        return Result.error(429, "请求过于频繁，请稍后重试");
-    }
-
-    // 一人一单预检
-    if (orderMapper.selectByUserAndGoods(userId, goodsId) != null) {
-        return Result.error(400, "每人限购一件");
-    }
-
-    long t1 = System.currentTimeMillis();
-    Long result = stringRedisTemplate.execute(
-            new DefaultRedisScript<>(STOCK_LUA, Long.class),
-            List.of("seckill:stock:" + goodsId),
-            "1");
-    long t2 = System.currentTimeMillis();
-
-    if (result == null) return Result.error(500, "系统繁忙");
-    if (result == -1) return Result.error(400, "商品不存在");
-    if (result == 0)  return Result.error(400, "已售罄");
-
-    // ★ 没有外层事务 → 这条 UPDATE 自己提交、自己释放行锁
-    int rows = goodsMapper.deductStock(goodsId);
-    long t3 = System.currentTimeMillis();
-    if (rows == 0) {
-        addStockToRedis(goodsId);           // DB 没扣成，把 Redis 预减的还回去
-        return Result.error(400, "库存不足");
-    }
-
-    String orderNo = UUID.randomUUID().toString().replace("-", "");
-    String body = userId + ":" + goodsId + ":" + orderNo;
-    try {
-        // MQ 在锁外发送（此时行锁已经释放，别的请求可以立刻进来扣库存）
-        rabbitTemplate.convertAndSend(
-                "",
-                RabbitMQConfig.SECKILL_ORDER_QUEUE,
-                body,
-                new SeckillCorrelationData(orderNo + ":order", body,
-                        "", RabbitMQConfig.SECKILL_ORDER_QUEUE));
-        rabbitTemplate.convertAndSend(
-                OrderTimeoutMQConfig.SECKILL_DELAY_EXCHANGE,
-                OrderTimeoutMQConfig.SECKILL_ORDER_DELAY_ROUTING_KEY,
-                body,
-                new SeckillCorrelationData(orderNo + ":delay", body,
-                        OrderTimeoutMQConfig.SECKILL_DELAY_EXCHANGE,
-                        OrderTimeoutMQConfig.SECKILL_ORDER_DELAY_ROUTING_KEY));
-    } catch (Exception e) {
-        // 没有事务兜底了，发失败要自己把库存还回去
-        log.error("V2 发 MQ 失败，回补库存 orderNo={}", orderNo, e);
-        goodsMapper.addStock(goodsId);
-        addStockToRedis(goodsId);
-        return Result.error(500, "下单失败，请重试");
-    }
-
-    long t4 = System.currentTimeMillis();
-    log.info("耗时拆解[V2无事务]: Redis={}ms, DB={}ms, MQ={}ms, 总={}ms",
-            t2 - t1, t3 - t2, t4 - t3, t4 - t1);
-
-    return Result.success(new SeckillResult(orderNo, "抢购成功，订单处理中"));
-}
-
 @Transactional
 public Result<?> doSeckillByRedis(Long userId, Long goodsId) {
     // 全局限流窗口（容量、速率均从配置读，便于压测时调整）
@@ -326,36 +220,39 @@ public Result<?> doSeckillByRedis(Long userId, Long goodsId) {
         return Result.error(400, "每人限购一件");
     }
 
-    long t1 = System.currentTimeMillis();
-    Long result = stringRedisTemplate.execute(
-            new DefaultRedisScript<>(STOCK_LUA, Long.class),   // "让 Redis 执行这段 Lua，返回数字"
-            List.of("seckill:stock:" + goodsId),               // "脚本里 KEYS[1] 用这个 key"
-            "1");                                              // "脚本里 ARGV[1] 用 1"（直接传，别包 List）
+    // ===== ② 先定单号：它在 Redis 标记里当「凭证」，必须早于 Lua =====
+    String orderNo = UUID.randomUUID().toString().replace("-", "");
 
+    long t1 = System.currentTimeMillis();
+    // ===== ③ Redis 原子闸门：查标记 → 查库存 → 扣减 + 写标记，四步同一个脚本 =====
+    //   主链路唯一的 Redis 闸门（早期无标记的 STOCK_LUA 已移除）
+    Long result = stringRedisTemplate.execute(
+            new DefaultRedisScript<>(STOCK_LUA_ACK, Long.class),
+            List.of("seckill:stock:" + goodsId, "seckill:user:" + goodsId),  // KEYS[1]=库存 KEYS[2]=标记
+            userId.toString(), orderNo);                                     // ARGV[1]=userId ARGV[2]=orderNo
     long t2 = System.currentTimeMillis();
 
     if (result == null) return Result.error(500, "系统繁忙");
+    if (result == -2) return Result.error(400, "每人限购一件");
     if (result == -1) return Result.error(400, "商品不存在");
     if (result == 0)  return Result.error(400, "已售罄");
 
-    // DB兜底，从数据库中扣除
+    // ===== ④ DB 兜底，从数据库中扣除 =====
     int rows = goodsMapper.deductStock(goodsId);
     // t3 必须取在 DB 扣减【之后】，否则 t3-t2≈0，DB 耗时永远显示 0
     long t3 = System.currentTimeMillis();
     if (rows == 0) {
+        // DB 没扣成 → 把 Redis 那一步整体撤回，否则用户会被自己的标记永久挡住（少卖）
+        rollbackSeckill(userId, goodsId, orderNo);
         return Result.error(400, "库存不足");
     }
 
     // 扣成功 → 发 MQ 消息（异步落单，削峰），不再同步 insert
-
-
-
-
-    // 创建订单order，创建uuid并且字符串话，并且将uuid前面的 - 号去掉
-    String orderNo = UUID.randomUUID().toString().replace("-", "");
     String body = userId + ":" + goodsId + ":" + orderNo;
     // 消息格式：userId:goodsId:orderNo（消费者靠这三样重建订单）
-    //
+
+
+
     // 【数据流动】convertAndSend(交换机, routingKey, 消息, 关联数据)
     //   · 交换机 = ""（空字符串）= 默认交换机
     //   · routingKey = 队列名 → 默认交换机按这个名字把消息投进队列
@@ -387,7 +284,28 @@ public Result<?> doSeckillByRedis(Long userId, Long goodsId) {
     return Result.success(new SeckillResult(orderNo, "抢购成功，订单处理中"));
 }
 
-
+    /**
+     * 撤回一次秒杀：删标记 + 库存 +1，两步在同一个 Lua 里做完
+     * 只用于「Redis 已经扣了，但后面没走成」——目前是 DB 扣减失败那一支
+     * 幂等：靠标记里存的 orderNo 当凭证，重复调用不会多还一件
+     */
+    public void rollbackSeckill(Long userId, Long goodsId, String orderNo) {
+        try {
+            Long r = stringRedisTemplate.execute(
+                    new DefaultRedisScript<>(ROLLBACK_LUA, Long.class),
+                    List.of("seckill:stock:" + goodsId, "seckill:user:" + goodsId),
+                    userId.toString(), orderNo);
+            if (r == null || r <= 0) {
+                // 0=已撤回过  -1=标记是新单的  -2=库存 key 不在，都不该硬补
+                log.warn("撤回跳过：goodsId={}, userId={}, orderNo={}, lua={}", goodsId, userId, orderNo, r);
+            } else {
+                log.info("已撤回（删标记+库存+1）：goodsId={}, userId={}, orderNo={}", goodsId, userId, orderNo);
+            }
+        } catch (Exception e) {
+            // 撤回本身失败不能盖掉原始错误，剩下的交给对账
+            log.error("撤回失败，交给对账兜底：goodsId={}, userId={}, orderNo={}", goodsId, userId, orderNo, e);
+        }
+    }
 
     @Transactional
     public Result<?> payOrder(String orderNo) {

@@ -58,7 +58,7 @@ import java.util.List;
 @Component
 public class StockReconcileTask {
 
-    /** Redis 库存 key 前缀，必须和 STOCK_LUA / StockPreheatRunner 里保持一致 */
+    /** Redis 库存 key 前缀，必须和 STOCK_LUA_ACK / StockPreheatRunner 里保持一致 */
     private static final String STOCK_KEY_PREFIX = "seckill:stock:";
 
     private final SeckillGoodsMapper goodsMapper;

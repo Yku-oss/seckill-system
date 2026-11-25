@@ -1,200 +1,268 @@
 <script setup>
+// 商品广场：用户在这里看有哪些限量商品，点进详情去抢
 import { ref, onMounted } from 'vue'
-import { getGoods, doSeckill, getOrder } from '../api'
+import { getGoods } from '../api'
+import { showToast } from '../toast'
 
-// ========== 响应式数据 ==========
-const goods = ref([])          // 商品列表
-const userId = ref(8888)       // 抢购用户 ID
-const goodsId = ref(1)         // 商品 ID
-const orderNo = ref('')        // 待查询的订单号
-const queryResult = ref(null)  // 订单查询结果
-const logs = ref([])           // 操作日志
+const goods = ref([])
 const loading = ref(false)
 
-// ========== 工具：加一条日志 ==========
-function addLog(msg, ok = true) {
-  const time = new Date().toLocaleTimeString()
-  logs.value.unshift({ time, msg, ok })
-}
-
-// ========== ① 加载商品列表 ==========
 async function loadGoods() {
+  loading.value = true
   try {
     const res = await getGoods()
     goods.value = res.data.data || []
-    addLog(`加载商品成功，共 ${goods.value.length} 条`)
   } catch (e) {
-    addLog('加载商品失败：' + e.message, false)
-  }
-}
-
-// ========== ② 秒杀下单 ==========
-async function handleSeckill() {
-  loading.value = true
-  try {
-    const res = await doSeckill(userId.value, goodsId.value)
-    const body = res.data
-    // 后端返回：{ code, message, data: { orderNo, message } }
-    if (body.code === 200) {
-      const { orderNo, message } = body.data
-      addLog(`${message}｜订单号：${orderNo}`, true)
-      orderNo.value = orderNo      // ⭐ 自动填入查询框，方便立刻查询
-      await loadGoods()            // 刷新库存
-    } else {
-      addLog(`抢购失败(${body.code})：${body.message}`, false)
-    }
-  } catch (e) {
-    addLog('请求异常：' + e.message, false)
+    showToast('商品加载失败，请刷新重试', 'error')
   } finally {
     loading.value = false
   }
 }
 
-// ========== ③ 查询订单 ==========
-async function handleQuery() {
-  if (!orderNo.value.trim()) {
-    addLog('请先输入订单号', false)
-    return
-  }
-  try {
-    const res = await getOrder(orderNo.value.trim())
-    const body = res.data
-    if (body.code === 200) {
-      queryResult.value = body.data
-      addLog(`订单查询成功：${body.data.orderNo}`)
-    } else {
-      queryResult.value = null
-      addLog(`订单查询失败(${body.code})：${body.message}`, false)
-    }
-  } catch (e) {
-    addLog('请求异常：' + e.message, false)
-  }
+// 商品状态：即将开始 / 抢购中 / 已售罄 / 已结束
+function statusOf(g) {
+  const now = Date.now()
+  const start = new Date(g.startTime).getTime()
+  const end = new Date(g.endTime).getTime()
+  if (g.stock <= 0) return { text: '已售罄', cls: 'off' }
+  if (now < start) return { text: '即将开始', cls: 'wait' }
+  if (now > end) return { text: '已结束', cls: 'off' }
+  return { text: '抢购中', cls: 'on' }
 }
 
-// 状态码转中文
-function statusText(s) {
-  return { 0: '待支付', 1: '已支付', 2: '已取消' }[s] || '未知'
+// 已抢比例，用来画进度条
+function soldPercent(g) {
+  if (!g.initialStock) return 0
+  const sold = g.initialStock - g.stock
+  return Math.min(100, Math.max(0, (sold / g.initialStock) * 100))
 }
 
-// 页面加载时自动拉商品
 onMounted(loadGoods)
 </script>
 
 <template>
   <div class="page">
-    <h1>⚡ 秒杀系统</h1>  
-    <p class="sub">Spring Boot + Redis + RabbitMQ + Docker ｜ 前端 Vue 3 + Vite</p>
-
-    <!-- ① 商品列表 -->
-    <section class="card">
-      <div class="card-head">
-        <h2>商品列表</h2>
-        <button class="btn-ghost" @click="loadGoods">刷新</button>
+    <section class="hero">
+      <div class="hero-copy">
+        <div class="eyebrow"><span class="live-dot"></span> 限时抢购进行中</div>
+        <h1>今日<span class="grad">限量</span></h1>
+        <p class="sub">每人限购一件，先到先得，售完即止。</p>
       </div>
-      <table v-if="goods.length">
-        <thead>
-          <tr>
-            <th>ID</th><th>名称</th><th>库存</th>
-            <th>开始时间</th><th>结束时间</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="g in goods" :key="g.id">
-            <td>{{ g.id }}</td>
-            <td>
-              <router-link :to="`/goods/` + g.id">{{g.goodsName}}</router-link>
-            </td>
-            <td>
-              <span :class="['stock', g.stock > 0 ? 'ok' : 'empty']">
-                {{ g.stock }}
-              </span>
-            </td>
-            <td>{{ g.startTime }}</td>
-            <td>{{ g.endTime }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <p v-else class="empty-tip">暂无商品数据</p>
-    </section>
-
-    <!-- ② 抢购 -->
-    <section class="card">
-      <h2>抢购</h2>
-      <div class="row">
-        <label>用户 ID
-          <input v-model.number="userId" type="number" />
-        </label>
-        <label>商品 ID
-          <input v-model.number="goodsId" type="number" />
-        </label>
-        <button class="btn-primary" :disabled="loading" @click="handleSeckill">
-          {{ loading ? '抢购中…' : '立即抢购' }}
-        </button>
+      <div class="hero-stat">
+        <div class="stat-num mono">{{ goods.length }}</div>
+        <div class="stat-label">在售商品</div>
       </div>
     </section>
 
-    <!-- ③ 订单查询 -->
-    <section class="card">
-      <h2>订单查询</h2>
-      <div class="row">
-        <input v-model="orderNo" placeholder="输入订单号（orderNo）" class="wide" />
-        <button class="btn-primary" @click="handleQuery">查询</button>
-      </div>
-      <div v-if="queryResult" class="order-box">
-        <p><b>订单号：</b>{{ queryResult.orderNo }}</p>
-        <p><b>用户 ID：</b>{{ queryResult.userId }}</p>
-        <p><b>商品 ID：</b>{{ queryResult.goodsId }}</p>
-        <p><b>状态：</b>{{ statusText(queryResult.status) }}</p>
-      </div>
-    </section>
+    <div v-if="loading" class="empty">加载中…</div>
 
-    <!-- ④ 操作日志 -->
-    <section class="card">
-      <h2>操作日志</h2>
-      <ul class="logs">
-        <li v-for="(l, i) in logs" :key="i" :class="l.ok ? 'ok' : 'err'">
-          <span class="time">{{ l.time }}</span>{{ l.msg }}
-        </li>
-      </ul>
-      <p v-if="!logs.length" class="empty-tip">暂无日志</p>
-    </section>
+    <div v-else-if="goods.length" class="grid">
+      <article v-for="g in goods" :key="g.id" class="goods">
+        <div class="goods-head">
+          <span class="goods-id mono">NO.{{ String(g.id).padStart(3, '0') }}</span>
+          <span :class="['tag', statusOf(g).cls]">{{ statusOf(g).text }}</span>
+        </div>
+
+        <h3 class="goods-name">{{ g.goodsName }}</h3>
+
+        <div class="stock">
+          <span class="stock-num">{{ g.stock }}</span>
+          <span class="stock-total">/ {{ g.initialStock }} 件</span>
+        </div>
+
+        <div class="bar"><i :style="{ width: soldPercent(g) + '%' }"></i></div>
+        <div class="bar-note">已抢 {{ g.initialStock - g.stock }} 件</div>
+
+        <router-link
+          v-if="g.stock > 0"
+          :to="`/goods/${g.id}`"
+          class="btn btn-primary goods-btn"
+        >立即抢购</router-link>
+        <button v-else class="btn goods-btn sold-out" disabled>已售罄</button>
+      </article>
+    </div>
+
+    <p v-else class="empty">暂无在售商品</p>
   </div>
 </template>
 
 <style scoped>
-.page { max-width: 960px; margin: 0 auto; padding: 24px 16px 60px; font-family: system-ui, "Microsoft YaHei", sans-serif; }
-h1 { margin: 0 0 4px; font-size: 26px; }
-.sub { color: #888; margin: 0 0 24px; font-size: 13px; }
-.card { background: #fff; border: 1px solid #e8e8e8; border-radius: 10px; padding: 18px; margin-bottom: 18px; box-shadow: 0 1px 3px rgba(0,0,0,.04); }
-.card h2 { margin: 0 0 14px; font-size: 16px; color: #333; }
-.card-head { display: flex; justify-content: space-between; align-items: center; }
-.card-head h2 { margin: 0; }
+.page { max-width: 1160px; margin: 0 auto; padding: 64px 32px 96px; }
 
-table { width: 100%; border-collapse: collapse; font-size: 14px; }
-th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid #f0f0f0; }
-th { background: #fafafa; color: #666; font-weight: 600; }
-.stock { font-weight: 700; }
-.stock.ok { color: #16a34a; }
-.stock.empty { color: #dc2626; }
+/* ---------- Hero ---------- */
+.hero {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 40px;
+  padding: 0 2px 40px;
+  margin-bottom: 36px;
+  border-bottom: 1px solid var(--line);
+  overflow: hidden;
+}
 
-.row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-label { display: flex; align-items: center; gap: 6px; font-size: 14px; color: #555; }
-input { padding: 7px 10px; border: 1px solid #d9d9d9; border-radius: 6px; font-size: 14px; width: 100px; }
-input.wide { width: 100%; flex: 1; min-width: 240px; }
+.hero::before {
+  content: "";
+  position: absolute;
+  top: -190px;
+  right: -90px;
+  width: 480px;
+  height: 480px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(230, 184, 119, .13), transparent 62%);
+  pointer-events: none;
+}
 
-button { cursor: pointer; border: none; border-radius: 6px; font-size: 14px; padding: 8px 18px; transition: .15s; }
-.btn-primary { background: #1677ff; color: #fff; }
-.btn-primary:hover:not(:disabled) { background: #0958d9; }
-.btn-primary:disabled { background: #a9c9ff; cursor: not-allowed; }
-.btn-ghost { background: #f5f5f5; color: #555; padding: 5px 12px; }
-.btn-ghost:hover { background: #e8e8e8; }
+.hero h1 {
+  position: relative;
+  margin: 22px 0 12px;
+  font-size: clamp(36px, 5.6vw, 60px);
+  line-height: 1.02;
+  letter-spacing: -.04em;
+  font-weight: 700;
+}
 
-.order-box { margin-top: 14px; padding: 12px 14px; background: #f6ffed; border: 1px solid #b7eb8f; border-radius: 8px; font-size: 14px; }
-.order-box p { margin: 5px 0; }
+.grad {
+  background: var(--gold);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
 
-.logs { list-style: none; padding: 0; margin: 0; max-height: 260px; overflow-y: auto; font-size: 13px; }
-.logs li { padding: 7px 10px; border-radius: 6px; margin-bottom: 6px; background: #f6ffed; color: #237804; font-family: Consolas, monospace; }
-.logs li.err { background: #fff1f0; color: #cf1322; }
-.time { color: #999; margin-right: 10px; }
-.empty-tip { color: #bbb; font-size: 13px; text-align: center; padding: 14px 0; }
+.sub {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.75;
+  color: var(--text-2);
+  max-width: 48ch;
+}
+
+.hero-stat {
+  position: relative;
+  flex: none;
+  text-align: right;
+  padding: 20px 26px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, rgba(230, 184, 119, .07), rgba(255, 255, 255, .012));
+}
+
+.stat-num {
+  font-size: 48px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -.04em;
+  font-variant-numeric: tabular-nums;
+  background: var(--gold);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.stat-label {
+  margin-top: 10px;
+  font: 500 10px var(--mono);
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+/* ---------- 商品卡片 ---------- */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 20px;
+}
+
+.goods {
+  position: relative;
+  padding: 26px 24px 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, rgba(255, 255, 255, .022), rgba(255, 255, 255, .008));
+  transition: border-color .25s var(--ease), transform .25s var(--ease);
+}
+
+.goods:hover {
+  border-color: rgba(230, 184, 119, .32);
+  transform: translateY(-2px);
+}
+
+.goods-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.goods-id { font: 500 10px var(--mono); letter-spacing: .16em; color: var(--text-3); }
+
+.tag {
+  font: 600 10px var(--mono);
+  letter-spacing: .1em;
+  padding: 4px 9px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+}
+.tag.on { color: var(--ok); border-color: rgba(78, 207, 138, .28); background: rgba(78, 207, 138, .08); }
+.tag.wait { color: var(--brand); border-color: rgba(230, 184, 119, .3); background: rgba(230, 184, 119, .08); }
+.tag.off { color: var(--text-3); border-color: var(--line); background: rgba(255, 255, 255, .03); }
+
+.goods-name {
+  margin: 0 0 20px;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  line-height: 1.35;
+}
+
+.stock { display: flex; align-items: baseline; gap: 7px; }
+
+.stock-num {
+  font: 700 34px/1 var(--mono);
+  letter-spacing: -.03em;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.stock-total { font-size: 12px; color: var(--text-3); }
+
+.bar {
+  height: 4px;
+  margin: 14px 0 8px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, .06);
+  overflow: hidden;
+}
+
+.bar i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--gold);
+  transition: width .5s var(--ease);
+}
+
+.bar-note { font: 11px var(--mono); color: var(--text-3); letter-spacing: .04em; }
+
+.goods-btn {
+  display: block;
+  width: 100%;
+  margin-top: 22px;
+  height: 44px;
+  font-size: 13px;
+}
+
+.sold-out { opacity: .45; cursor: not-allowed; }
+
+.empty { color: var(--text-3); text-align: center; padding: 72px 0; font-size: 13px; }
+
+@media (max-width: 720px) {
+  .page { padding: 40px 20px 72px; }
+  .hero { flex-direction: column; align-items: flex-start; gap: 26px; padding-bottom: 30px; }
+  .hero::before { top: -240px; right: -160px; }
+  .hero-stat { width: 100%; text-align: left; padding: 16px 20px; }
+}
 </style>

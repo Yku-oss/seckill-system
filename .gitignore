@@ -11,6 +11,10 @@ logs/
 .vscode/
 *.iws
 
+# 编辑器/工具缓存
+.workbuddy/
+frontend/.trae-html-share-packages/
+
 # 前端依赖与构建
 node_modules/
 frontend/dist/
